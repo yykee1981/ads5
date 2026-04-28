@@ -49,62 +49,64 @@ function requireEnv(name: string): string {
   return value;
 }
 
-const openai = new OpenAI({ apiKey: requireEnv('OPENAI_API_KEY') });
+const deepseek = new OpenAI({
+  apiKey: requireEnv('DEEPSEEK_API_KEY'),
+  baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+});
 const supabase = createClient(
   requireEnv('SUPABASE_URL'),
   requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
   { auth: { persistSession: false } },
 );
 
-const QUESTION_JSON_SCHEMA = {
-  name: 'multilingual_quiz_question',
-  strict: true,
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      desc_zh: { type: 'string' },
-      desc_en: { type: 'string' },
-      desc_ms: { type: 'string' },
-      question_zh: { type: 'string' },
-      question_en: { type: 'string' },
-      question_ms: { type: 'string' },
-      answer: { type: 'string', enum: ['A', 'B', 'C'] },
-      explanation_zh: { type: 'string' },
-      explanation_en: { type: 'string' },
-      explanation_ms: { type: 'string' },
-      optionzhA: { type: 'string' },
-      optionzhB: { type: 'string' },
-      optionzhC: { type: 'string' },
-      optionenA: { type: 'string' },
-      optionenB: { type: 'string' },
-      optionenC: { type: 'string' },
-      optionmsA: { type: 'string' },
-      optionmsB: { type: 'string' },
-      optionmsC: { type: 'string' },
-    },
-    required: [
-      'desc_zh', 'desc_en', 'desc_ms',
-      'question_zh', 'question_en', 'question_ms',
-      'answer',
-      'explanation_zh', 'explanation_en', 'explanation_ms',
-      'optionzhA', 'optionzhB', 'optionzhC',
-      'optionenA', 'optionenB', 'optionenC',
-      'optionmsA', 'optionmsB', 'optionmsC',
-    ],
-  },
-} as const;
+const REQUIRED_FIELDS: ReadonlyArray<keyof GeneratedQuestion> = [
+  'desc_zh', 'desc_en', 'desc_ms',
+  'question_zh', 'question_en', 'question_ms',
+  'answer',
+  'explanation_zh', 'explanation_en', 'explanation_ms',
+  'optionzhA', 'optionzhB', 'optionzhC',
+  'optionenA', 'optionenB', 'optionenC',
+  'optionmsA', 'optionmsB', 'optionmsC',
+];
+
+const SCHEMA_HINT = `Return ONLY a single JSON object with EXACTLY these keys (no extras, no markdown, no comments):
+{
+  "desc_zh": string, "desc_en": string, "desc_ms": string,
+  "question_zh": string, "question_en": string, "question_ms": string,
+  "answer": "A" | "B" | "C",
+  "explanation_zh": string, "explanation_en": string, "explanation_ms": string,
+  "optionzhA": string, "optionzhB": string, "optionzhC": string,
+  "optionenA": string, "optionenB": string, "optionenC": string,
+  "optionmsA": string, "optionmsB": string, "optionmsC": string
+}`;
+
+function validateQuestion(value: unknown): GeneratedQuestion {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Model output is not a JSON object.');
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of REQUIRED_FIELDS) {
+    if (typeof obj[key] !== 'string') {
+      throw new Error(`Model output missing string field "${key}".`);
+    }
+  }
+  if (obj.answer !== 'A' && obj.answer !== 'B' && obj.answer !== 'C') {
+    throw new Error(`Model output "answer" must be A/B/C, got ${String(obj.answer)}.`);
+  }
+  return obj as unknown as GeneratedQuestion;
+}
 
 async function generateQuestion(topic: string): Promise<GeneratedQuestion> {
-  const model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
+  const model = process.env.DEEPSEEK_MODEL ?? 'deepseek-chat';
 
-  const completion = await openai.chat.completions.create({
+  const completion = await deepseek.chat.completions.create({
     model,
     messages: [
       {
         role: 'system',
         content:
-          'You write friendly, concise multiple-choice trivia questions in three languages: Chinese (zh), English (en), and Malay (ms). Each question must have exactly three options labelled A, B and C, with one correct answer. The "desc" field is a short upbeat one-sentence caption. The "explanation" briefly justifies why the correct option is correct. Options A, B and C must line up across all three languages (option A in Chinese, English and Malay all describe the same answer).',
+          'You write friendly, concise multiple-choice trivia questions in three languages: Chinese (zh), English (en), and Malay (ms). Each question must have exactly three options labelled A, B and C, with one correct answer. The "desc" field is a short upbeat one-sentence caption. The "explanation" briefly justifies why the correct option is correct. Options A, B and C must line up across all three languages (option A in Chinese, English and Malay all describe the same answer).\n\n' +
+          SCHEMA_HINT,
       },
       {
         role: 'user',
@@ -112,18 +114,17 @@ async function generateQuestion(topic: string): Promise<GeneratedQuestion> {
           `Topic: ${topic}\n\n` +
           'Generate one new multiple-choice question with three options (A, B, C). ' +
           'Provide every text field in Chinese (zh), English (en) and Malay (ms). ' +
-          'The "answer" field must be one of "A", "B", or "C" and refer to the correct option in all three languages.',
+          'The "answer" field must be one of "A", "B", or "C" and refer to the correct option in all three languages. ' +
+          'Output the JSON object only.',
       },
     ],
-    response_format: {
-      type: 'json_schema',
-      json_schema: QUESTION_JSON_SCHEMA,
-    },
+    response_format: { type: 'json_object' },
+    temperature: 0.7,
   });
 
   const content = completion.choices[0]?.message?.content;
-  if (!content) throw new Error('OpenAI returned an empty completion.');
-  return JSON.parse(content) as GeneratedQuestion;
+  if (!content) throw new Error('DeepSeek returned an empty completion.');
+  return validateQuestion(JSON.parse(content));
 }
 
 function toRow(q: GeneratedQuestion): Ads5Row {
